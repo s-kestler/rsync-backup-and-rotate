@@ -9,7 +9,8 @@
 #
 # Modified for local use by s-kestler <https://github.com/s-kestler/rsync-backup-and-rotate>
 # I also renamed a few variables to keep them in line with rsync naming (e.g. source and destination
-# instead of server_path and data_path
+# instead of server_path and data_path.
+# Consolidated the scripts backup-rotate and backup-rsync into one single script.
 #
 # Usage: backup-rsync [-s /path/to/source] [-e path/to/excludelist] [-o additional options] [-d /path/to/destination] [-i d, w, m, y for daily, weekly, monthly, yearly]
 #
@@ -29,8 +30,12 @@ DESTINATION=/mnt/backup
 # Liste von Dateipattern, die nicht gebackupt werden sollen
 EXCLUDES=./exclude.txt
 
+#List of files/directories to include and/or exclude
+INCLUDES=./includes.txt
+
 # Interval for backup folder naming d=daily, w=weekly, m=monthly, y=yearly
 INTERVAL=d
+MAXINT=7
 
 # Additional rsync options.
 # Example: EXTRAOPT="--bwlimit=196" to limit bandwidth-usage
@@ -38,7 +43,7 @@ EXTRAOPT=""
 
 # Read parameter options
 OPTIND=1
-while getopts ":s:e:o:d:i:" opt; do
+while getopts ":s:e:o:d:i:n" opt; do
 	case $opt in
 		s)
 			SOURCE="$OPTARG"
@@ -54,6 +59,9 @@ while getopts ":s:e:o:d:i:" opt; do
 			;;
 		i)
 			INTERVAL="$OPTARG"
+			;;
+		n)
+			INCLUDES="$OPTARG"
 			;;
 		\?)
 			echo "Invalid option: -$OPTARG" >&2
@@ -102,80 +110,139 @@ logger "Source path: $SOURCE"
 echo "Backup path: $DESTINATION"
 logger "Backup path: $DESTINATION"
 
-# if [ -n "$SSH_ADDRESS" ] ; then
-# # If parameter -s is provided, use it as target address for rsync command (including username)
-	# echo "SSH_ADDRESS provided: $SSH_ADDRESS"
-	# RSYNCSERVERPATH="$SSH_ADDRESS:/"
-# elif [ $TARGETNAME = "localhost" ] ; then
-# # If server is localhost, use simple local path
-	# echo "Targetname localhost"
-	# RSYNCSERVERPATH="/"
-# else
-	# echo "Targetname provided: $TARGETNAME"
-	# RSYNCSERVERPATH="$TARGETNAME:/"
-# fi
-
-# Make sure file for excludelist exists
-if [ -f $EXCLUDES ] ; then
-	echo "Using excludelist: $EXCLUDES"
-	logger "Using excludelist: $EXCLUDES"
-else
-	# Fail
-	echo "Could not find excludelist $EXCLUDES"
-	logger "Could not find excludelist $EXCLUDES"
-	exit 1
-fi
-
-# ### Let´s Rock`n`Roll
-
-# Check disk space
+# Check available space and inodes
 GETPERCENTAGE='s/.* \([0-9]\{1,3\}\)%.*/\1/'
 if $CHECK_HDMINFREE ; then
 	KBISFREE=`df /$DESTINATION | tail -n1 | sed -e "$GETPERCENTAGE"`
 	INODEISFREE=`df -i /$DESTINATION | tail -n1 | sed -e "$GETPERCENTAGE"`
 	if [ $KBISFREE -ge $HDMINFREE -o $INODEISFREE -ge $HDMINFREE ] ; then
-		echo "Fatal: Not enough space left for rsyncing backups!"
-		logger "Fatal: Not enough space left for rsyncing backups!"
-		exit 1
-	fi
-fi
-
-# Mount disk as read/write if configured
-if $MOUNT_RO ; then
-	if `mount -o remount,rw $MOUNT_DEVICE $DESTINATION` ; then
-	echo mount -o remount,rw $MOUNT_DEVICE $DESTINATION
-		echo "Error: Could not remount $MOUNT_DEVICE readwrite"
-		logger "Error: Could not remount $MOUNT_DEVICE readwrite"
+		echo "Fatal: Not enough space left for rotating backups!"
+		logger "Fatal: Not enough space left for rotating backups!"
 		exit
 	fi
 fi
 
-# Ggf. Verzeichnis anlegen
+# Mount as read/write if configured
+if $MOUNT_RO ; then
+	if `mount -o remount,rw $MOUNT_DEVICE $DESTINATION` ; then
+		echo "Error: Could not remount $MOUNT_DEV readwrite"
+		logger "Error: Could not remount $MOUNT_DEV readwrite"
+		exit
+	fi
+fi
+
+##################################
+## START ROTATING
+##################################
+
+# Create backup dir
 if ! [ -d $DESTINATION/$INTERVAL.0 ] ; then
 	mkdir -p $DESTINATION/$INTERVAL.0
 fi
 
-# Los geht`s: rsync zieht ein Vollbackup
+STARTDATE=$(date +'%Y-%m-%d %T')
+echo "$STARTDATE Rotating snapshots ..."
+logger "$STARTDATE Rotating snapshots ..."
+
+# Delete oldest daily backup
+if [ -d $DESTINATION/$INTERVAL.$MAXINT ] ; then
+	rm -rf $DESTINATION/$INTERVAL.$MAXINT
+fi
+
+# Shift all other daily backups ahead one day
+#for OLD in 6 5 4 3 2 1	; do
+#MAXVAL=$MAXINT-1
+#for OLD in {$MAXVAL..1..-1}	; do
+for (( OLD=$MAXINT-1; OLD>=1; OLD-- )) do
+	echo "$DESTINATION/$INTERVAL.$OLD in progress"
+	logger "$DESTINATION/$INTERVAL.$OLD in progress"
+	if [ -d $DESTINATION/$INTERVAL.$OLD ] ; then
+		NEW=$(($OLD+1))
+
+		echo "Moving $DESTINATION/$INTERVAL.$OLD to $DESTINATION/$INTERVAL.$NEW"
+		logger "Moving $DESTINATION/$INTERVAL.$OLD to $DESTINATION/$INTERVAL.$NEW"
+
+		# Backup last date
+		# ISSUE: touch does not support options on synology (busybox) system
+		#touch $DESTINATION/.timestamp -r $DESTINATION/$INTERVAL.$OLD
+		mv $DESTINATION/$INTERVAL.$OLD $DESTINATION/$INTERVAL.$NEW
+		# Restore timestamp
+		#touch $DESTINATION/$INTERVAL.$NEW -r $DESTINATION/.timestamp
+
+	fi
+done
+
+# Copy hardlinked snapshot of level 0 to level 1 (before updating 0 via rsync)
+if [ -d $DESTINATION/$INTERVAL.0 ] ; then
+
+	echo "Copying hardlinks from $DESTINATION/$INTERVAL.0 to $DESTINATION/$INTERVAL.1"
+	logger "Copying hardlinks from $DESTINATION/$INTERVAL.0 to $DESTINATION/$INTERVAL.1"
+
+	cp -al $DESTINATION/$INTERVAL.0 $DESTINATION/$INTERVAL.1
+fi
+
+ENDDATE=$(date +'%Y-%m-%d %T')
+echo "$ENDDATE Finished rotating snapshots ..."
+logger "$ENDDATE Finished rotating snapshots ..."
+
+##################################
+## END ROTATING
+##################################
+
+##################################
+## START RSYNCING
+##################################
+
+# Make sure file for excludelist exists
+if [ -f $EXCLUDES ] ; then
+	echo "Using excludelist: $EXCLUDES"
+	logger "Using excludelist: $EXCLUDES"
+	EXCLUDES = "--exclude-from=\"$EXCLUDES\""
+else
+	# Fail
+	echo "Could not find excludelist $EXCLUDES"
+	logger "Could not find excludelist $EXCLUDES"
+	EXCLUDES = ""
+fi
+
+# Make sure file for includelist exists
+if [ -f $INCLUDES ] ; then
+	echo "Using includelist: $INCLUDES"
+	logger "Using includelist: $INCLUDES"
+	INCLUDES = "--include-from=\"$INCLUDES\""
+else
+	# Fail
+	echo "Could not find includelist $INCLUDES"
+	logger "Could not find includelist $INCLUDES"
+	INCLUDES = ""
+fi
+
+# create directory if needed
+if ! [ -d $DESTINATION/$INTERVAL.0 ] ; then
+	mkdir -p $DESTINATION/$INTERVAL.0
+fi
+
+# Here we go: rsync crates a full backup
 echo "Starting rsync backup ..."
 logger "Starting rsync backup ..."
 
 echo "rsync -avz --numeric-ids -e ssh \
 --delete --delete-excluded	\
 --out-format="%t %f" \
---exclude-from="$EXCLUDES" $EXTRAOPT \
+$EXCLUDES $EXTRAOPT \
 $SOURCE \
 $DESTINATION/$INTERVAL.0"
 logger "rsync -avz --numeric-ids -e ssh \
 --delete --delete-excluded	\
 --out-format="%t %f" \
---exclude-from="$EXCLUDES" $EXTRAOPT \
+$EXCLUDES $EXTRAOPT \
 $SOURCE \
 $DESTINATION/$INTERVAL.0"
 
 rsync -avz --numeric-ids -e ssh \
 	--delete --delete-excluded	\
 	--out-format="%t %f" \
-	--exclude-from="$EXCLUDES" $EXTRAOPT \
+	$EXCLUDES $EXTRAOPT \
 	$SOURCE \
 	$DESTINATION/$INTERVAL.0
 
@@ -197,6 +264,11 @@ logger "Finished rsync backup ..."
 
 # Sync disks to make sure data is written to disk
 sync
+
+
+##################################
+## END RSYNCING
+##################################
 
 # Remount disk as read-only
 if $MOUNT_RO ; then

@@ -1,35 +1,28 @@
 # rsync-backup-and-rotate
 
-These scripts provide a simple way to run rsync and rotate the backups to keep copies of modified files.
+This script provides a simple way to run rsync and rotate the backups to keep copies of modified files.
 
 The rotation is done with hardlinks, which means that the disk space is only used for multiple copies of
-an unchanged file in multiple backup sets (daily, monthly, yearly). Only changed files contribute to the disk
-space.
+an unchanged file in multiple backup sets (daily, monthly, yearly). Only changed files contribute to the disk space.
 
 ## Usage
 
-Before using this script, you should have a functional SSH connection for the user
-you're planning to use for the backup (can be root) using keys for authentication.
-https://help.ubuntu.com/community/SSH/OpenSSH/Keys provides good information about
-how to setup SSH key authentication.
+Use crontab or similar for calling the script with parameters periodically.
 
 ### Configuration
 
 rsync
 
     backup-rsync
-        -e /etc/excludefile     # (optional) path to excludefile, default is /root/.excludeliste-rsync
+        -s                      # path to source
+        -d /backup/path         # (optional) path to destination, default is "/mnt/backup"
+        -e exclude.txt          # (optional) path to excludefile, default is ./exclude.txt
+        -i d                    # (optional) interval: d = daily, w = weekly, m = monthly, y = yearly, 
+                                # default is d; only for correct naming of directories!
+                                # Configure run interval via crontab!
         -o extra rsync options  # (optional) additional rsync parameters (see "man rsync")
-        -p /backup/path         # (optional) path to backup, default is "/home/backup"
-        <fqdn-servername>       # fully qualified domain name of the server to be backed up
 
-rotate
-
-    backup-rotate
-        -p /backup/path         # (optional) path to backup, default is "/home/backup"
-        <fqdn-servername>       # fully qualified domain name of the server to be backed up
-
-The backup will be written into the directory `/backup/path/<fqdn-servername>/daily.0/`
+The backup will be written into the directory `/backup/path/daily.0/`
 
 Excludefile sample
 
